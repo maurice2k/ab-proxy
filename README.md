@@ -33,3 +33,12 @@ Application Options:
 Help Options:
   -h, --help               Show this help message
 ```
+
+
+## TODO
+
+* Support bind to address for all outgoing connections (ab's `-B` switch)
+* Support HEAD, POST, PUT requests (ab's `-i`, `-p`, `-u` switches)
+* Support to allow only specific TLS versions and/or ciphers
+
+
