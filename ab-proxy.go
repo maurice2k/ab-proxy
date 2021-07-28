@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jessevdk/go-flags"
+	statslib "github.com/montanaflynn/stats"
 	"github.com/schollz/progressbar/v2"
 )
 
@@ -72,6 +73,17 @@ func exitWithErrorMsg(exitCode int, message string, replacements ...interface{})
 	}
 	fmt.Fprintln(os.Stderr, message)
 	os.Exit(exitCode)
+}
+
+type RequestCostTimeList struct {
+	statslib.Float64Data
+	locker *sync.Mutex
+}
+
+func (l *RequestCostTimeList) Insert(v float64) {
+	l.locker.Lock()
+	l.Float64Data = append(l.Float64Data, v)
+	l.locker.Unlock()
 }
 
 func main() {
@@ -174,7 +186,7 @@ func main() {
 
 	}
 
-	var stats struct {
+	var stats = struct {
 		Requests              int64
 		RequestsCompleted     int64
 		RequestsCompletedCode [1000]int64
@@ -184,7 +196,8 @@ func main() {
 		BytesTransferred      int64
 		StartTime             time.Time
 		EndTime               time.Time
-	}
+		RequestsCostData      *RequestCostTimeList
+	}{}
 
 	totalRequests := mainOpts.Bursts * mainOpts.Requests
 
@@ -232,6 +245,7 @@ func main() {
 	// start benchmarking
 
 	stats.StartTime = time.Now()
+	stats.RequestsCostData = &RequestCostTimeList{locker: new(sync.Mutex), Float64Data: statslib.Float64Data{}}
 
 	for b := 0; b < mainOpts.Bursts && stopChan != nil; b++ {
 		var requestsLeft int64
@@ -261,6 +275,7 @@ func main() {
 
 					var err error
 					var resp *http.Response
+					var startTheReq = time.Now()
 					req, err := http.NewRequest("GET", mainOpts.Args.Url, nil)
 					if err == nil {
 						req.Header = http.Header(headers)
@@ -318,18 +333,17 @@ func main() {
 
 					resp.Body.Close()
 
-
 					if errWhileReading {
 						continue
 					}
 
 					atomic.AddInt64(&stats.RequestsCompleted, 1)
+					stats.RequestsCostData.Insert(float64(time.Since(startTheReq) / time.Millisecond))
 					if resp.StatusCode >= 0 && resp.StatusCode <= 999 {
 						atomic.AddInt64(&stats.RequestsCompletedCode[resp.StatusCode], 1)
 					} else {
 						atomic.AddInt64(&stats.RequestsCompletedCode[0], 1)
 					}
-
 
 				}
 				wg.Done()
@@ -379,6 +393,12 @@ func main() {
 		reqPerSec := float32(float32(time.Second) / float32(timePerReq))
 		fmt.Printf("Requests per second:          %.3f\n", reqPerSec)
 		fmt.Printf("Time per request:             %s\n", timePerReq)
+	}
+
+	fmt.Println("Percentage of the requests served within a certain time (ms)")
+	for _, p := range []int{50, 75, 90, 95, 99, 100} {
+		v, _ := stats.RequestsCostData.Percentile(float64(p))
+		fmt.Printf("%3d%%\t%g\n", p, v)
 	}
 
 	if mainOpts.ShowErrors {
