@@ -163,7 +163,8 @@ func main() {
 		} else if uri.Scheme == "https" || uri.Scheme == "http" || uri.Scheme == "" {
 
 			tr = &http.Transport{
-				Proxy: http.ProxyURL(uri),
+				ProxyConnectHeader: http.Header(headers),
+				Proxy:              http.ProxyURL(uri),
 				// Disable HTTP/2.
 				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 			}
