@@ -208,6 +208,24 @@ run_test_variants "PUT request - 5 reqs with body" \
     ".requests.codes.\"200\"=5" \
     ".bytes_transferred=15"
 
+# Test 10: TLS 1.2 (valid - server requires TLS 1.2)
+run_test_variants "TLS 1.2 (valid) - 5 reqs" \
+    "" \
+    "-n 5 --tls-min 1.2 --tls-max 1.2 --tls-insecure https://target:443/" \
+    ".requests.total=5" \
+    ".requests.completed=5" \
+    ".requests.failed=0" \
+    ".requests.codes.\"200\"=5" \
+    ".bytes_transferred=15"
+
+# Test 11: TLS 1.3 (invalid - server requires TLS 1.2, client forces 1.3)
+run_test_variants "TLS 1.3 rejected - 5 reqs" \
+    "" \
+    "-n 5 --tls-min 1.3 --tls-insecure https://target:443/" \
+    ".requests.total=5" \
+    ".requests.completed=0" \
+    ".requests.failed=5"
+
 echo ""
 echo "=========================================="
 echo -e "Results: ${GREEN}$PASS passed${NC}, ${RED}$FAIL failed${NC}"

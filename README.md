@@ -39,6 +39,9 @@ Application Options:
   -i                       Use HEAD instead of GET
   -p, --post-file=<file>   File containing data to POST
   -u, --put-file=<file>    File containing data to PUT
+      --tls-min=<version>  Minimum TLS version (1.2, 1.3)
+      --tls-max=<version>  Maximum TLS version (1.2, 1.3)
+      --tls-cipher=<name>  Allowed TLS cipher suite (repeatable)
 
 Help Options:
   -h, --help               Show this help message
@@ -52,9 +55,5 @@ Integration tests use Docker Compose with a target server and [moproxy](https://
 $ ./tests/run_tests.sh
 $ ./tests/run_tests.sh --logs   # include container logs
 ```
-
-## TODO
-
-* Support to allow only specific TLS versions and/or ciphers
 
 

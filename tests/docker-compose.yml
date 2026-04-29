@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.target
     ports:
       - "9000:80"
+      - "9443:443"
     healthcheck:
       test: ["CMD", "curl", "-sf", "--max-time", "1", "http://localhost/health"]
       interval: 1s

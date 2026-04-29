@@ -98,6 +98,10 @@ var mainOpts struct {
 	HeadRequest bool     `short:"i" description:"Use HEAD instead of GET"`
 	PostFile    string   `short:"p" long:"post-file" description:"File containing data to POST" value-name:"<file>"`
 	PutFile     string   `short:"u" long:"put-file" description:"File containing data to PUT" value-name:"<file>"`
+	TlsMin      string   `long:"tls-min" description:"Minimum TLS version (1.2, 1.3)" value-name:"<version>"`
+	TlsMax      string   `long:"tls-max" description:"Maximum TLS version (1.2, 1.3)" value-name:"<version>"`
+	TlsCipher   []string `long:"tls-cipher" description:"Allowed TLS cipher suite (repeatable, e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)" value-name:"<name>"`
+	TlsInsecure bool     `long:"tls-insecure" description:"Skip TLS certificate verification"`
 	Args        struct {
 		Url string `positional-arg-name:"URL"`
 	} `positional-args:"yes" required:"yes"`
@@ -110,6 +114,31 @@ func exitWithErrorMsg(exitCode int, message string, replacements ...interface{})
 	}
 	fmt.Fprintln(os.Stderr, message)
 	os.Exit(exitCode)
+}
+
+func parseTlsVersion(s string) (uint16, error) {
+	switch s {
+	case "1.2":
+		return tls.VersionTLS12, nil
+	case "1.3":
+		return tls.VersionTLS13, nil
+	default:
+		return 0, fmt.Errorf("invalid TLS version: %s (expected 1.2 or 1.3)", s)
+	}
+}
+
+func parseCipherName(name string) (uint16, error) {
+	for _, cs := range tls.CipherSuites() {
+		if cs.Name == name {
+			return cs.ID, nil
+		}
+	}
+	for _, cs := range tls.InsecureCipherSuites() {
+		if cs.Name == name {
+			return cs.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown cipher suite: %s", name)
 }
 
 func printJsonResult(method string, stats struct {
@@ -357,7 +386,9 @@ func main() {
 	// setup transport
 	var tr *http.Transport = nil
 
-	if mainOpts.BindAddr != "" || mainOpts.Proxy != "" {
+	hasTls := mainOpts.TlsMin != "" || mainOpts.TlsMax != "" || len(mainOpts.TlsCipher) > 0
+
+	if mainOpts.BindAddr != "" || mainOpts.Proxy != "" || hasTls {
 		tr = &http.Transport{}
 
 		if mainOpts.BindAddr != "" {
@@ -389,6 +420,36 @@ func main() {
 			} else {
 				exitWithErrorMsg(5, "Unable to handle proxy with scheme '%s'", uri.Scheme)
 			}
+		}
+
+		if hasTls {
+			cfg := &tls.Config{
+				InsecureSkipVerify: mainOpts.TlsInsecure,
+			}
+
+			if mainOpts.TlsMin != "" {
+				v, err := parseTlsVersion(mainOpts.TlsMin)
+				if err != nil {
+					exitWithErrorMsg(4, "%s", err)
+				}
+				cfg.MinVersion = v
+			}
+			if mainOpts.TlsMax != "" {
+				v, err := parseTlsVersion(mainOpts.TlsMax)
+				if err != nil {
+					exitWithErrorMsg(4, "%s", err)
+				}
+				cfg.MaxVersion = v
+			}
+			for _, name := range mainOpts.TlsCipher {
+				cs, err := parseCipherName(name)
+				if err != nil {
+					exitWithErrorMsg(4, "%s", err)
+				}
+				cfg.CipherSuites = append(cfg.CipherSuites, cs)
+			}
+
+			tr.TLSClientConfig = cfg
 		}
 	}
 

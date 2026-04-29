@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -80,7 +81,30 @@ func handler(ctx *fasthttp.RequestCtx) {
 }
 
 func main() {
-	fmt.Println("target server listening on :80")
+	fmt.Println("target server listening on :80 and :443 (TLS 1.2 only)")
+
+	cer, err := tls.LoadX509KeyPair("/server.crt", "/server.key")
+	if err != nil {
+		panic(err)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{cer},
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS12,
+	}
+
+	ln, err := tls.Listen("tcp", ":443", tlsCfg)
+	if err != nil {
+		panic(err)
+	}
+
+	go func() {
+		if err := fasthttp.Serve(ln, handler); err != nil {
+			panic(err)
+		}
+	}()
+
 	if err := fasthttp.ListenAndServe(":80", handler); err != nil {
 		panic(err)
 	}
