@@ -42,6 +42,8 @@ Application Options:
       --tls-min=<version>  Minimum TLS version (1.2, 1.3)
       --tls-max=<version>  Maximum TLS version (1.2, 1.3)
       --tls-cipher=<name>  Allowed TLS cipher suite (repeatable)
+      --tls-insecure      Skip TLS certificate verification
+      --latency           Output latency distribution percentiles
 
 Help Options:
   -h, --help               Show this help message

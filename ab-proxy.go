@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -74,6 +75,14 @@ type jsonReqStats struct {
 	ProxyAuthFailures int64            `json:"proxy_auth_failures"`
 	TimeoutFailures   int64            `json:"timeout_failures"`
 	Codes             map[string]int64 `json:"codes"`
+	Latency           *jsonLatency     `json:"latency_ms,omitempty"`
+}
+
+type jsonLatency struct {
+	Average float64            `json:"average"`
+	Stddev  float64            `json:"stddev"`
+	Max     float64            `json:"max"`
+	Perc    map[string]float64 `json:"percentiles"`
 }
 
 type jsonErrItem struct {
@@ -103,6 +112,7 @@ var mainOpts struct {
 	TlsMax      string   `long:"tls-max" description:"Maximum TLS version (1.2, 1.3)" value-name:"<version>"`
 	TlsCipher   []string `long:"tls-cipher" description:"Allowed TLS cipher suite (repeatable, e.g. TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)" value-name:"<name>"`
 	TlsInsecure bool     `long:"tls-insecure" description:"Skip TLS certificate verification"`
+	Latency     bool     `long:"latency" description:"Output latency distribution percentiles"`
 	Args        struct {
 		Url string `positional-arg-name:"URL"`
 	} `positional-args:"yes" required:"yes"`
@@ -115,6 +125,19 @@ func exitWithErrorMsg(exitCode int, message string, replacements ...interface{})
 	}
 	fmt.Fprintln(os.Stderr, message)
 	os.Exit(exitCode)
+}
+
+func percentileSorted(data []float64, p float64) float64 {
+	if len(data) == 0 {
+		return 0
+	}
+	k := (p / 100) * float64(len(data)-1)
+	f := math.Floor(k)
+	c := math.Ceil(k)
+	if f == c {
+		return data[int(k)]
+	}
+	return data[int(f)]*(c-k) + data[int(c)]*(k-f)
 }
 
 func parseTlsVersion(s string) (uint16, error) {
@@ -152,7 +175,8 @@ func printJsonResult(method string, stats struct {
 	BytesTransferred      int64
 	StartTime             time.Time
 	EndTime               time.Time
-}, elapsed time.Duration) {
+	RequestDurations      []float64
+}, elapsed time.Duration, latency *jsonLatency) {
 	codes := make(map[string]int64)
 	for c := range stats.RequestsCompletedCode {
 		if stats.RequestsCompletedCode[c] > 0 {
@@ -182,6 +206,7 @@ func printJsonResult(method string, stats struct {
 			ProxyAuthFailures: stats.FailedProxyAuth,
 			TimeoutFailures:   stats.FailedTimeout,
 			Codes:             codes,
+			Latency:           latency,
 		},
 		BytesTransferred: stats.BytesTransferred,
 		ReqPerSec:        reqPerSec,
@@ -231,36 +256,49 @@ func printTextResult(stats struct {
 	BytesTransferred      int64
 	StartTime             time.Time
 	EndTime               time.Time
-}, elapsed time.Duration) {
-	fmt.Printf("Number of bursts:             %d\n", mainOpts.Bursts)
-	fmt.Printf("Number of request per burst   %d\n", mainOpts.Requests)
-	fmt.Printf("Concurrency level:            %d\n", mainOpts.Concurrency)
-	fmt.Printf("Time taken for tests:         %s\n\n", elapsed)
+	RequestDurations      []float64
+}, elapsed time.Duration, latency *jsonLatency) {
+	fmt.Printf("%-30s %d\n", "Number of bursts:", mainOpts.Bursts)
+	fmt.Printf("%-30s %d\n", "Number of request per burst:", mainOpts.Requests)
+	fmt.Printf("%-30s %d\n", "Concurrency level:", mainOpts.Concurrency)
+	fmt.Printf("%-30s %s\n\n", "Time taken for tests:", elapsed)
 
-	fmt.Printf("Total initiated requests:     %d\n", stats.Requests)
-	fmt.Printf("   Completed requests:        %d\n", stats.RequestsCompleted)
+	fmt.Printf("%-30s %d\n", "Total initiated requests:", stats.Requests)
+	fmt.Printf("%-30s %d\n", "   Completed requests:", stats.RequestsCompleted)
 	for c := range stats.RequestsCompletedCode {
 		if stats.RequestsCompletedCode[c] > 0 {
-			fmt.Printf("      HTTP-%03d completed:     %d\n", c, stats.RequestsCompletedCode[c])
+			fmt.Printf("%-30s %d\n", fmt.Sprintf("      HTTP-%03d completed:", c), stats.RequestsCompletedCode[c])
 		}
 	}
 
-	fmt.Printf("   Failed requests:           %d\n", stats.RequestsFailed)
+	fmt.Printf("%-30s %d\n", "   Failed requests:", stats.RequestsFailed)
 	if stats.FailedProxyAuth > 0 {
-		fmt.Printf("      Proxy auth failures:    %d\n", stats.FailedProxyAuth)
+		fmt.Printf("%-30s %d\n", "      Proxy auth failures:", stats.FailedProxyAuth)
 	}
 
 	if stats.FailedTimeout > 0 {
-		fmt.Printf("      Timeout failures:       %d\n", stats.FailedTimeout)
+		fmt.Printf("%-30s %d\n", "      Timeout failures:", stats.FailedTimeout)
 	}
 
-	fmt.Printf("\nTotal transferred:            %d bytes\n", stats.BytesTransferred)
+	fmt.Printf("\n%-30s %d bytes\n", "Total transferred:", stats.BytesTransferred)
 
 	if stats.Requests > 0 {
 		timePerReq := elapsed / time.Duration(stats.Requests)
+		meanTimePerReq := timePerReq * time.Duration(mainOpts.Concurrency)
 		reqPerSec := float32(float32(time.Second) / float32(timePerReq))
-		fmt.Printf("Requests per second:          %.3f\n", reqPerSec)
-		fmt.Printf("Time per request:             %s\n", timePerReq)
+		fmt.Printf("%-30s %.3f\n", "   Requests per second:", reqPerSec)
+		fmt.Printf("%-30s %s\n", "   Time per request (mean):", meanTimePerReq)
+		fmt.Printf("%-30s %s\n", "   Time per req (throughput):", timePerReq)
+	}
+
+	if latency != nil {
+		fmt.Printf("\nLatency Distribution (ms):\n")
+		fmt.Printf("   %-10s %8.2f\n", "Average:", latency.Average)
+		fmt.Printf("   %-10s %8.2f\n", "Stddev:", latency.Stddev)
+		fmt.Printf("   %-10s %8.2f\n", "Max:", latency.Max)
+		for _, p := range []string{"50", "75", "90", "95", "99"} {
+			fmt.Printf("   %-10s %8.2f\n", p+"%:", latency.Perc[p])
+		}
 	}
 
 	if mainOpts.ShowErrors {
@@ -477,7 +515,9 @@ func main() {
 		BytesTransferred      int64
 		StartTime             time.Time
 		EndTime               time.Time
+		RequestDurations      []float64
 	}
+	var durationsMu sync.Mutex
 
 	totalRequests := mainOpts.Bursts * mainOpts.Requests
 
@@ -561,6 +601,7 @@ func main() {
 					if bodyData != nil {
 						reqBody = bytes.NewReader(bodyData)
 					}
+					reqStart := time.Now()
 					req, err := http.NewRequest(method, mainOpts.Args.Url, reqBody)
 					if err == nil {
 						req.Header = http.Header(headers)
@@ -631,6 +672,13 @@ func main() {
 						atomic.AddInt64(&stats.RequestsCompletedCode[0], 1)
 					}
 
+					if mainOpts.Latency {
+						d := float64(time.Since(reqStart)) / float64(time.Millisecond)
+						durationsMu.Lock()
+						stats.RequestDurations = append(stats.RequestDurations, d)
+						durationsMu.Unlock()
+					}
+
 
 				}
 				wg.Done()
@@ -651,9 +699,38 @@ func main() {
 	stats.EndTime = time.Now()
 	elapsed := stats.EndTime.Sub(stats.StartTime)
 
+	var latency *jsonLatency
+	if mainOpts.Latency && len(stats.RequestDurations) > 0 {
+		sort.Float64s(stats.RequestDurations)
+		var sum float64
+		for _, d := range stats.RequestDurations {
+			sum += d
+		}
+		mean := sum / float64(len(stats.RequestDurations))
+		var sumSq float64
+		for _, d := range stats.RequestDurations {
+			d2 := d - mean
+			sumSq += d2 * d2
+		}
+		stddev := math.Sqrt(sumSq / float64(len(stats.RequestDurations)))
+
+		perc := make(map[string]float64)
+		for _, p := range []string{"50", "75", "90", "95", "99"} {
+			pv, _ := strconv.ParseFloat(p, 64)
+			perc[p] = percentileSorted(stats.RequestDurations, pv)
+		}
+
+		latency = &jsonLatency{
+			Average: mean,
+			Stddev:  stddev,
+			Max:     stats.RequestDurations[len(stats.RequestDurations)-1],
+			Perc:    perc,
+		}
+	}
+
 	if mainOpts.Json {
-		printJsonResult(method, stats, elapsed)
+		printJsonResult(method, stats, elapsed, latency)
 	} else {
-		printTextResult(stats, elapsed)
+		printTextResult(stats, elapsed, latency)
 	}
 }
