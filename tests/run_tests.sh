@@ -101,19 +101,20 @@ run_test_variants() {
 }
 
 echo "Starting services..."
-$COMPOSE up -d --build target moproxy
+$COMPOSE up -d --build target moproxy moproxy-auth
 
 echo "Waiting for services to be ready..."
 timeout=30
 start=$(date +%s)
 while true; do
-    curl -sf --max-time 1 http://localhost:9000/ >/dev/null 2>&1 && target_ok=1 || target_ok=0
+    curl -sf --max-time 1 http://localhost:9000/health >/dev/null 2>&1 && target_ok=1 || target_ok=0
     curl -s --max-time 1 http://localhost:8080/ >/dev/null 2>&1 && proxy_ok=1 || proxy_ok=0
-    if [ "$target_ok" = "1" ] && [ "$proxy_ok" = "1" ]; then
+    curl -s --max-time 1 http://localhost:2080/ >/dev/null 2>&1 && auth_proxy_ok=1 || auth_proxy_ok=0
+    if [ "$target_ok" = "1" ] && [ "$proxy_ok" = "1" ] && [ "$auth_proxy_ok" = "1" ]; then
         break
     fi
     if [ $(($(date +%s) - start)) -gt $timeout ]; then
-        echo "Timeout waiting for services ($target_ok/$proxy_ok). Dumping logs:"
+        echo "Timeout waiting for services (target=$target_ok proxy=$proxy_ok auth=$auth_proxy_ok). Dumping logs:"
         $COMPOSE logs
         exit 1
     fi
@@ -225,6 +226,37 @@ run_test_variants "TLS 1.3 rejected - 5 reqs" \
     ".requests.total=5" \
     ".requests.completed=0" \
     ".requests.failed=5"
+
+# Compute proxy auth header
+PROXY_AUTH="Proxy-Authorization: Basic $(echo -n 'testuser:testpass' | base64)"
+
+# Test 12: Proxy auth correct
+run_test "Proxy auth (correct) - 5 reqs via HTTP proxy" \
+    "$COMPOSE run --rm ab-proxy --json -n 5 --tls-insecure -P \"$PROXY_AUTH\" -X http://moproxy-auth:8080 https://target:443/" \
+    ".requests.total=5" \
+    ".requests.completed=5" \
+    ".requests.failed=0" \
+    ".requests.proxy_auth_failures=0" \
+    ".requests.codes.\"200\"=5" \
+    ".bytes_transferred=15"
+
+# Test 13: Proxy auth wrong password
+PROXY_AUTH_WRONG="Proxy-Authorization: Basic $(echo -n 'testuser:wrongpass' | base64)"
+
+run_test "Proxy auth (wrong) - 5 reqs via HTTP proxy" \
+    "$COMPOSE run --rm ab-proxy --json -n 5 --tls-insecure -P \"$PROXY_AUTH_WRONG\" -X http://moproxy-auth:8080 https://target:443/" \
+    ".requests.total=5" \
+    ".requests.completed=0" \
+    ".requests.failed=5" \
+    ".requests.proxy_auth_failures=5"
+
+# Test 14: Proxy auth missing
+run_test "Proxy auth (missing) - 5 reqs via HTTP proxy" \
+    "$COMPOSE run --rm ab-proxy --json -n 5 --tls-insecure -X http://moproxy-auth:8080 https://target:443/" \
+    ".requests.total=5" \
+    ".requests.completed=0" \
+    ".requests.failed=5" \
+    ".requests.proxy_auth_failures=5"
 
 echo ""
 echo "=========================================="

@@ -1,0 +1,12 @@
+FROM golang:1.24-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/maurice2k/moproxy.git .
+RUN CGO_ENABLED=0 go build -o /moproxy ./bin/moproxy.go
+
+FROM alpine:3.21
+RUN apk add --no-cache curl
+COPY --from=builder /moproxy /moproxy
+COPY moproxy/moproxy-auth.conf /etc/moproxy/moproxy.conf
+EXPOSE 1080 8080
+ENTRYPOINT ["/moproxy", "-c", "/etc/moproxy/moproxy.conf", "-vvvv"]

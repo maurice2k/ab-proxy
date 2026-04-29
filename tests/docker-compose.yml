@@ -25,6 +25,19 @@ services:
       retries: 20
       start_period: 2s
 
+  moproxy-auth:
+    build:
+      context: .
+      dockerfile: Dockerfile.moproxy-auth
+    ports:
+      - "2080:8080"
+      - "2081:1080"
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "--max-time", "1", "http://localhost:8080/"]
+      interval: 1s
+      retries: 20
+      start_period: 2s
+
   ab-proxy:
     build:
       context: ..
@@ -35,4 +48,6 @@ services:
       target:
         condition: service_healthy
       moproxy:
+        condition: service_healthy
+      moproxy-auth:
         condition: service_healthy

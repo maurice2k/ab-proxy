@@ -91,6 +91,7 @@ var mainOpts struct {
 	Timeout     int      `short:"s" description:"Maximum time in seconds a complete HTTP request may take (0 means no limit)" value-name:"<number>" default:"0"`
 	UserAgent   string   `long:"user-agent" description:"Sets user agent" default:"ab-proxy/1.0.0"`
 	Header      []string `short:"H" long:"header" description:"Add extra header to the request (i.e. \"Accept-Encoding: 8bit\")"`
+	ProxyHeader []string `short:"P" long:"proxy-header" description:"Add extra header to the proxy CONNECT request (i.e. \"Proxy-Authorization: Basic ...\")"`
 	ShowErrors  bool     `long:"show-errors" description:"Show list of errors sorted by frequency (max. 100 unique errors)"`
 	Json        bool     `long:"json" description:"Output results as JSON"`
 	Version     bool     `long:"version" description:"Show version"`
@@ -383,10 +384,20 @@ func main() {
 		exitWithErrorMsg(3, "Unable to parse custom headers: %s", err)
 	}
 
+	var proxyHeaders http.Header
+	if len(mainOpts.ProxyHeader) > 0 {
+		tp2 := textproto.NewReader(bufio.NewReader(strings.NewReader(strings.Join(mainOpts.ProxyHeader, "\r\n") + "\r\n\r\n")))
+		mimeHdr, err := tp2.ReadMIMEHeader()
+		if err != nil {
+			exitWithErrorMsg(3, "Unable to parse proxy custom headers: %s", err)
+		}
+		proxyHeaders = http.Header(mimeHdr)
+	}
+
 	// setup transport
 	var tr *http.Transport = nil
 
-	hasTls := mainOpts.TlsMin != "" || mainOpts.TlsMax != "" || len(mainOpts.TlsCipher) > 0
+	hasTls := mainOpts.TlsInsecure || mainOpts.TlsMin != "" || mainOpts.TlsMax != "" || len(mainOpts.TlsCipher) > 0
 
 	if mainOpts.BindAddr != "" || mainOpts.Proxy != "" || hasTls {
 		tr = &http.Transport{}
@@ -415,6 +426,9 @@ func main() {
 				tr.Proxy = http.ProxyURL(uri)
 			} else if uri.Scheme == "https" || uri.Scheme == "http" || uri.Scheme == "" {
 				tr.Proxy = http.ProxyURL(uri)
+				if proxyHeaders != nil {
+					tr.ProxyConnectHeader = proxyHeaders
+				}
 				// Disable HTTP/2.
 				tr.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
 			} else {
@@ -561,8 +575,9 @@ func main() {
 						atomic.AddInt64(&stats.RequestsFailed, 1)
 
 						if mainOpts.Proxy != "" {
-							if strings.Contains(err.Error(), "authentication") ||
-								strings.Contains(err.Error(), "username/password") {
+							errStr := strings.ToLower(err.Error())
+							if strings.Contains(errStr, "authentication") ||
+								strings.Contains(errStr, "username/password") {
 								atomic.AddInt64(&stats.FailedProxyAuth, 1)
 							}
 
