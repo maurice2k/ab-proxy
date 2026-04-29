@@ -1,0 +1,37 @@
+services:
+  target:
+    build:
+      context: .
+      dockerfile: Dockerfile.target
+    ports:
+      - "9000:80"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "--max-time", "1", "http://localhost/health"]
+      interval: 1s
+      retries: 20
+      start_period: 2s
+
+  moproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.moproxy
+    ports:
+      - "1080:1080"
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "--max-time", "1", "http://localhost:8080/"]
+      interval: 1s
+      retries: 20
+      start_period: 2s
+
+  ab-proxy:
+    build:
+      context: ..
+      dockerfile: tests/Dockerfile.ab-proxy
+    profiles:
+      - cli
+    depends_on:
+      target:
+        condition: service_healthy
+      moproxy:
+        condition: service_healthy

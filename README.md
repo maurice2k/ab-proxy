@@ -4,13 +4,18 @@ ab-proxy is an Apache benchmark (ab) inspired tool with support for HTTP(S) and 
 
 ## Installation
 ```
-$ go get -u github.com/maurice2k/ab-proxy
-$ $GOPATH/bin/ab-proxy -h
+$ go install github.com/maurice2k/ab-proxy@latest
+$ ab-proxy -h
 ```
 
 ## Sample usage
 ```
 $ ab-proxy -c 10 -n 200 --bursts 2 --proxy 'socks5://192.168.10.1' 'https://example.org'
+```
+
+Use `--json` for machine-readable output:
+```
+$ ab-proxy --json -n 50 -X socks5://proxy:1080 http://target/ | jq .
 ```
 
 ## Available command line options
@@ -27,6 +32,7 @@ Application Options:
   -s=<number>              Maximum time in seconds a complete HTTP request may take (0 means no limit) (default: 0)
       --user-agent=        Sets user agent (default: ab-proxy/1.0.0)
   -H, --header=            Add extra header to the request (i.e. "Accept-Encoding: 8bit")
+      --json               Output results as JSON
       --show-errors        Show list of errors sorted by frequency (max. 100 unique errors)
       --version            Show version
 
@@ -34,6 +40,14 @@ Help Options:
   -h, --help               Show this help message
 ```
 
+## Testing
+
+Integration tests use Docker Compose with a target server and [moproxy](https://github.com/maurice2k/moproxy) as the proxy:
+
+```
+$ ./tests/run_tests.sh
+$ ./tests/run_tests.sh --logs   # include container logs
+```
 
 ## TODO
 

@@ -1,10 +1,11 @@
-// Copyright 2019 Moritz Fain
+// Copyright 2019-2026 Moritz Fain
 // Moritz Fain <moritz@fain.io>
 package main
 
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -23,7 +24,7 @@ import (
 	"time"
 
 	"github.com/jessevdk/go-flags"
-	"github.com/schollz/progressbar/v2"
+	"github.com/schollz/progressbar/v3"
 )
 
 const version string = "1.0.0"
@@ -48,6 +49,36 @@ func (a errListByCnt) Len() int           { return len(a) }
 func (a errListByCnt) Less(i, j int) bool { return a[i].cnt < a[j].cnt }
 func (a errListByCnt) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
+type jsonResult struct {
+	TargetURL        string           `json:"target_url"`
+	ProxyURL         string           `json:"proxy_url,omitempty"`
+	Bursts           int              `json:"bursts"`
+	RequestsPerBurst int              `json:"requests_per_burst"`
+	Concurrency      int              `json:"concurrency"`
+	TimeTakenNs      int64            `json:"time_taken_ns"`
+	TimeTaken        string           `json:"time_taken"`
+	Requests         jsonReqStats     `json:"requests"`
+	BytesTransferred int64            `json:"bytes_transferred"`
+	ReqPerSec        float64          `json:"requests_per_second"`
+	TimePerReqNs     int64            `json:"time_per_request_ns"`
+	TimePerReq       string           `json:"time_per_request"`
+	Errors           []jsonErrItem    `json:"errors,omitempty"`
+}
+
+type jsonReqStats struct {
+	Total             int64            `json:"total"`
+	Completed         int64            `json:"completed"`
+	Failed            int64            `json:"failed"`
+	ProxyAuthFailures int64            `json:"proxy_auth_failures"`
+	TimeoutFailures   int64            `json:"timeout_failures"`
+	Codes             map[string]int64 `json:"codes"`
+}
+
+type jsonErrItem struct {
+	Count   int    `json:"count"`
+	Message string `json:"message"`
+}
+
 // flags definition
 var mainOpts struct {
 	Concurrency int      `short:"c" description:"Number of multiple requests to perform at a time. Default is one request at a time." default:"1" value-name:"<number>"`
@@ -59,6 +90,7 @@ var mainOpts struct {
 	UserAgent   string   `long:"user-agent" description:"Sets user agent" default:"ab-proxy/1.0.0"`
 	Header      []string `short:"H" long:"header" description:"Add extra header to the request (i.e. \"Accept-Encoding: 8bit\")"`
 	ShowErrors  bool     `long:"show-errors" description:"Show list of errors sorted by frequency (max. 100 unique errors)"`
+	Json        bool     `long:"json" description:"Output results as JSON"`
 	Version     bool     `long:"version" description:"Show version"`
 	Args        struct {
 		Url string `positional-arg-name:"URL"`
@@ -72,6 +104,152 @@ func exitWithErrorMsg(exitCode int, message string, replacements ...interface{})
 	}
 	fmt.Fprintln(os.Stderr, message)
 	os.Exit(exitCode)
+}
+
+func printJsonResult(stats struct {
+	Requests              int64
+	RequestsCompleted     int64
+	RequestsCompletedCode [1000]int64
+	RequestsFailed        int64
+	FailedProxyAuth       int64
+	FailedTimeout         int64
+	BytesTransferred      int64
+	StartTime             time.Time
+	EndTime               time.Time
+}, elapsed time.Duration) {
+	codes := make(map[string]int64)
+	for c := range stats.RequestsCompletedCode {
+		if stats.RequestsCompletedCode[c] > 0 {
+			codes[strconv.Itoa(c)] = stats.RequestsCompletedCode[c]
+		}
+	}
+
+	var timePerReq time.Duration
+	var reqPerSec float64
+	if stats.Requests > 0 {
+		timePerReq = elapsed / time.Duration(stats.Requests)
+		reqPerSec = float64(time.Second) / float64(timePerReq)
+	}
+
+	result := jsonResult{
+		TargetURL:        mainOpts.Args.Url,
+		Bursts:           mainOpts.Bursts,
+		RequestsPerBurst: mainOpts.Requests,
+		Concurrency:      mainOpts.Concurrency,
+		TimeTakenNs:      int64(elapsed),
+		TimeTaken:        elapsed.String(),
+		Requests: jsonReqStats{
+			Total:             stats.Requests,
+			Completed:         stats.RequestsCompleted,
+			Failed:            stats.RequestsFailed,
+			ProxyAuthFailures: stats.FailedProxyAuth,
+			TimeoutFailures:   stats.FailedTimeout,
+			Codes:             codes,
+		},
+		BytesTransferred: stats.BytesTransferred,
+		ReqPerSec:        reqPerSec,
+		TimePerReqNs:     int64(timePerReq),
+		TimePerReq:       timePerReq.String(),
+	}
+
+	if mainOpts.Proxy != "" {
+		result.ProxyURL = mainOpts.Proxy
+	}
+
+	if mainOpts.ShowErrors {
+		close(errChan)
+		errWg.Wait()
+
+		if len(errMap) > 0 {
+			var errList []errItem
+			for errMsg, cnt := range errMap {
+				errList = append(errList, errItem{cnt, errMsg})
+			}
+			sort.Sort(sort.Reverse(errListByCnt(errList)))
+
+			for idx, e := range errList {
+				if idx >= maxUniqueErrors {
+					break
+				}
+				result.Errors = append(result.Errors, jsonErrItem{Count: e.cnt, Message: e.errMsg})
+			}
+		}
+	}
+
+	out, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "JSON encoding error: %s\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(out))
+}
+
+func printTextResult(stats struct {
+	Requests              int64
+	RequestsCompleted     int64
+	RequestsCompletedCode [1000]int64
+	RequestsFailed        int64
+	FailedProxyAuth       int64
+	FailedTimeout         int64
+	BytesTransferred      int64
+	StartTime             time.Time
+	EndTime               time.Time
+}, elapsed time.Duration) {
+	fmt.Printf("Number of bursts:             %d\n", mainOpts.Bursts)
+	fmt.Printf("Number of request per burst   %d\n", mainOpts.Requests)
+	fmt.Printf("Concurrency level:            %d\n", mainOpts.Concurrency)
+	fmt.Printf("Time taken for tests:         %s\n\n", elapsed)
+
+	fmt.Printf("Total initiated requests:     %d\n", stats.Requests)
+	fmt.Printf("   Completed requests:        %d\n", stats.RequestsCompleted)
+	for c := range stats.RequestsCompletedCode {
+		if stats.RequestsCompletedCode[c] > 0 {
+			fmt.Printf("      HTTP-%03d completed:     %d\n", c, stats.RequestsCompletedCode[c])
+		}
+	}
+
+	fmt.Printf("   Failed requests:           %d\n", stats.RequestsFailed)
+	if stats.FailedProxyAuth > 0 {
+		fmt.Printf("      Proxy auth failures:    %d\n", stats.FailedProxyAuth)
+	}
+
+	if stats.FailedTimeout > 0 {
+		fmt.Printf("      Timeout failures:       %d\n", stats.FailedTimeout)
+	}
+
+	fmt.Printf("\nTotal transferred:            %d bytes\n", stats.BytesTransferred)
+
+	if stats.Requests > 0 {
+		timePerReq := elapsed / time.Duration(stats.Requests)
+		reqPerSec := float32(float32(time.Second) / float32(timePerReq))
+		fmt.Printf("Requests per second:          %.3f\n", reqPerSec)
+		fmt.Printf("Time per request:             %s\n", timePerReq)
+	}
+
+	if mainOpts.ShowErrors {
+		close(errChan)
+		errWg.Wait()
+
+		if len(errMap) > 0 {
+			var errList []errItem
+			for errMsg, cnt := range errMap {
+				errList = append(errList, errItem{cnt, errMsg})
+			}
+
+			sort.Sort(sort.Reverse(errListByCnt(errList)))
+
+			fmt.Printf("\nErrors:\n")
+			errPrintf := "% " + strconv.Itoa(len(strconv.Itoa(int(errList[0].cnt)))+1) + "dx  %s\n"
+
+			for idx, err := range errList {
+				if idx == maxUniqueErrors {
+					fmt.Printf("... (list truncated)\n")
+					break
+				}
+				fmt.Printf(errPrintf, err.cnt, err.errMsg)
+			}
+		}
+	}
 }
 
 func main() {
@@ -188,38 +366,41 @@ func main() {
 
 	totalRequests := mainOpts.Bursts * mainOpts.Requests
 
-	if mainOpts.Proxy != "" {
-		fmt.Printf("Benchmarking '%s' using proxy '%s' with a total of %d GET requests:\n\n", mainOpts.Args.Url, mainOpts.Proxy, totalRequests)
-	} else {
-		fmt.Printf("Benchmarking '%s' with a total of %d GET requests:\n\n", mainOpts.Args.Url, totalRequests)
+	if !mainOpts.Json {
+		if mainOpts.Proxy != "" {
+			fmt.Printf("Benchmarking '%s' using proxy '%s' with a total of %d GET requests:\n\n", mainOpts.Args.Url, mainOpts.Proxy, totalRequests)
+		} else {
+			fmt.Printf("Benchmarking '%s' with a total of %d GET requests:\n\n", mainOpts.Args.Url, totalRequests)
+		}
 	}
 
-	// progress bar initialization
-	bar = progressbar.NewOptions(totalRequests,
-		progressbar.OptionClearOnFinish(),
-		progressbar.OptionSetRenderBlankState(true),
-		progressbar.OptionSetDescription("Progress"),
-		progressbar.OptionSetTheme(progressbar.Theme{Saucer: "=", SaucerPadding: "-", BarStart: "[", BarEnd: "]", SaucerHead: ">"}),
-	)
+	if !mainOpts.Json {
+		bar = progressbar.NewOptions(totalRequests,
+			progressbar.OptionClearOnFinish(),
+			progressbar.OptionSetRenderBlankState(true),
+			progressbar.OptionSetDescription("Progress"),
+			progressbar.OptionSetTheme(progressbar.Theme{Saucer: "=", SaucerPadding: "-", BarStart: "[", BarEnd: "]", SaucerHead: ">"}),
+		)
+	}
 
 	go func() {
 		lastNum := 0
 		for {
 			select {
 			case <-stopChan:
-				// wait for SIGINT, SIGHUP, SIGTERM
 				stopChan = nil
-				fmt.Printf("\nStopping benchmark...\n\n")
+				if !mainOpts.Json {
+					fmt.Printf("\nStopping benchmark...\n\n")
+				}
 				signal.Reset(syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM)
 			default:
-				// process progress bar
 				curNum := int(stats.RequestsCompleted + stats.RequestsFailed)
 
 				if curNum == totalRequests || stopChan == nil {
 					break
 				}
 
-				if curNum - lastNum > 0 {
+				if bar != nil && curNum-lastNum > 0 {
 					bar.Add(curNum - lastNum)
 				}
 
@@ -343,67 +524,16 @@ func main() {
 		}
 	}
 
-	bar.Finish()
+	if bar != nil {
+		bar.Finish()
+	}
 
 	stats.EndTime = time.Now()
 	elapsed := stats.EndTime.Sub(stats.StartTime)
 
-	// print results
-
-	fmt.Printf("Number of bursts:             %d\n", mainOpts.Bursts)
-	fmt.Printf("Number of request per burst   %d\n", mainOpts.Requests)
-	fmt.Printf("Concurrency level:            %d\n", mainOpts.Concurrency)
-	fmt.Printf("Time taken for tests:         %s\n\n", elapsed)
-
-	fmt.Printf("Total initiated requests:     %d\n", stats.Requests)
-	fmt.Printf("   Completed requests:        %d\n", stats.RequestsCompleted)
-	for c := range stats.RequestsCompletedCode {
-		if stats.RequestsCompletedCode[c] > 0 {
-			fmt.Printf("      HTTP-%03d completed:     %d\n", c, stats.RequestsCompletedCode[c])
-		}
-	}
-
-	fmt.Printf("   Failed requests:           %d\n", stats.RequestsFailed)
-	if stats.FailedProxyAuth > 0 {
-		fmt.Printf("      Proxy auth failures:    %d\n", stats.FailedProxyAuth)
-	}
-
-	if stats.FailedTimeout > 0 {
-		fmt.Printf("      Timeout failures:       %d\n", stats.FailedTimeout)
-	}
-
-	fmt.Printf("\nTotal transferred:            %d bytes\n", stats.BytesTransferred)
-
-	if stats.Requests > 0 {
-		timePerReq := time.Duration(elapsed / time.Duration(stats.Requests))
-		reqPerSec := float32(float32(time.Second) / float32(timePerReq))
-		fmt.Printf("Requests per second:          %.3f\n", reqPerSec)
-		fmt.Printf("Time per request:             %s\n", timePerReq)
-	}
-
-	if mainOpts.ShowErrors {
-		close(errChan)
-		errWg.Wait() // wait until all errors from the errChan have been set to the errMap
-
-		if len(errMap) > 0 {
-			// generate sortable list of errMap
-			var errList []errItem
-			for errMsg, cnt := range errMap {
-				errList = append(errList, errItem{cnt, errMsg})
-			}
-
-			sort.Sort(sort.Reverse(errListByCnt(errList)))
-
-			fmt.Printf("\nErrors:\n")
-			errPrintf := "% " + strconv.Itoa(len(strconv.Itoa(int(errList[0].cnt)))+1) + "dx  %s\n"
-
-			for idx, err := range errList {
-				if idx == maxUniqueErrors {
-					fmt.Printf("... (list truncated)\n")
-					break
-				}
-				fmt.Printf(errPrintf, err.cnt, err.errMsg)
-			}
-		}
+	if mainOpts.Json {
+		printJsonResult(stats, elapsed)
+	} else {
+		printTextResult(stats, elapsed)
 	}
 }
