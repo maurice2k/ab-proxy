@@ -32,6 +32,11 @@ cleanup() {
 
 trap cleanup EXIT
 
+TESTDATA=$(mktemp -d)
+echo -n "hello-post-data" > "$TESTDATA/post.txt"
+echo -n "hello-put-data" > "$TESTDATA/put.txt"
+trap 'rm -rf "$TESTDATA"' EXIT
+
 run_test() {
     local name="$1"
     local cmd="$2"
@@ -72,8 +77,9 @@ run_test() {
 
 run_test_variants() {
     local base_name="$1"
-    local abproxy_args="$2"
-    shift 2
+    local extra_flags="$2"
+    local abproxy_args="$3"
+    shift 3
     local validations=("$@")
 
     local modes=(
@@ -89,7 +95,7 @@ run_test_variants() {
         [ -n "$proxy_flag" ] && proxy_flag=" $proxy_flag"
 
         run_test "$base_name ($mode_label)" \
-            "$COMPOSE run --rm ab-proxy --json $abproxy_args$proxy_flag" \
+            "$COMPOSE run --rm $extra_flags ab-proxy --json $abproxy_args$proxy_flag" \
             "${validations[@]}"
     done
 }
@@ -118,6 +124,7 @@ echo "Services ready."
 
 # Test 1: Basic request
 run_test_variants "Basic request - 10 reqs" \
+    "" \
     "-n 10 http://target/" \
     ".requests.total=10" \
     ".requests.completed=10" \
@@ -127,6 +134,7 @@ run_test_variants "Basic request - 10 reqs" \
 
 # Test 2: Concurrency
 run_test_variants "Concurrency - 20 reqs, concurrency 4" \
+    "" \
     "-n 20 -c 4 http://target/" \
     ".requests.total=20" \
     ".requests.completed=20" \
@@ -135,6 +143,7 @@ run_test_variants "Concurrency - 20 reqs, concurrency 4" \
 
 # Test 3: Bytes transferred accuracy
 run_test_variants "Bytes transferred - 5 reqs, 1024 bytes each" \
+    "" \
     "-n 5 http://target/size/1024" \
     ".requests.total=5" \
     ".bytes_transferred=5120" \
@@ -143,6 +152,7 @@ run_test_variants "Bytes transferred - 5 reqs, 1024 bytes each" \
 
 # Test 4: HTTP status codes
 run_test_variants "HTTP status codes - 10 reqs returning 404" \
+    "" \
     "-n 10 http://target/status/404" \
     ".requests.total=10" \
     ".requests.codes.\"404\"=10" \
@@ -150,6 +160,7 @@ run_test_variants "HTTP status codes - 10 reqs returning 404" \
 
 # Test 5: Multiple bursts
 run_test_variants "Bursts - 3 bursts of 5 requests each" \
+    "" \
     "-n 5 --bursts 3 --delay 0 http://target/" \
     ".bursts=3" \
     ".requests_per_burst=5" \
@@ -160,11 +171,42 @@ run_test_variants "Bursts - 3 bursts of 5 requests each" \
 
 # Test 6: Custom headers
 run_test_variants "Custom headers - 5 reqs with X-Test header" \
+    "" \
     "-n 5 -H \"X-Test: hello\" http://target/headers" \
     ".requests.total=5" \
     ".requests.completed=5" \
     ".requests.failed=0" \
     ".requests.codes.\"200\"=5"
+
+# Test 7: HEAD request
+run_test_variants "HEAD request - 5 reqs" \
+    "" \
+    "-n 5 -i http://target/" \
+    ".requests.total=5" \
+    ".requests.completed=5" \
+    ".requests.failed=0" \
+    ".requests.codes.\"200\"=5" \
+    ".bytes_transferred=0"
+
+# Test 8: POST request
+run_test_variants "POST request - 5 reqs with body" \
+    "-v $TESTDATA/post.txt:/post.txt" \
+    "-n 5 -p /post.txt http://target/echo" \
+    ".requests.total=5" \
+    ".requests.completed=5" \
+    ".requests.failed=0" \
+    ".requests.codes.\"200\"=5" \
+    ".bytes_transferred=15"
+
+# Test 9: PUT request
+run_test_variants "PUT request - 5 reqs with body" \
+    "-v $TESTDATA/put.txt:/put.txt" \
+    "-n 5 -u /put.txt http://target/echo" \
+    ".requests.total=5" \
+    ".requests.completed=5" \
+    ".requests.failed=0" \
+    ".requests.codes.\"200\"=5" \
+    ".bytes_transferred=15"
 
 echo ""
 echo "=========================================="

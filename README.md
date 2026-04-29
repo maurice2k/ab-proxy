@@ -35,6 +35,10 @@ Application Options:
       --json               Output results as JSON
       --show-errors        Show list of errors sorted by frequency (max. 100 unique errors)
       --version            Show version
+  -B, --bind=<address>     Bind outgoing connections to local address
+  -i                       Use HEAD instead of GET
+  -p, --post-file=<file>   File containing data to POST
+  -u, --put-file=<file>    File containing data to PUT
 
 Help Options:
   -h, --help               Show this help message
@@ -51,8 +55,6 @@ $ ./tests/run_tests.sh --logs   # include container logs
 
 ## TODO
 
-* Support bind to address for all outgoing connections (ab's `-B` switch)
-* Support HEAD, POST, PUT requests (ab's `-i`, `-p`, `-u` switches)
 * Support to allow only specific TLS versions and/or ciphers
 
 

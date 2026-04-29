@@ -59,6 +59,11 @@ func handler(ctx *fasthttp.RequestCtx) {
 		statusCode = 200
 		body = b
 
+	case path == "/echo":
+		contentType = "text/plain"
+		statusCode = 200
+		body = []byte("OK\n")
+
 	default:
 		statusCode = 404
 	}

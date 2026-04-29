@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -52,6 +53,7 @@ func (a errListByCnt) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 type jsonResult struct {
 	TargetURL        string           `json:"target_url"`
 	ProxyURL         string           `json:"proxy_url,omitempty"`
+	Method           string           `json:"method"`
 	Bursts           int              `json:"bursts"`
 	RequestsPerBurst int              `json:"requests_per_burst"`
 	Concurrency      int              `json:"concurrency"`
@@ -92,6 +94,10 @@ var mainOpts struct {
 	ShowErrors  bool     `long:"show-errors" description:"Show list of errors sorted by frequency (max. 100 unique errors)"`
 	Json        bool     `long:"json" description:"Output results as JSON"`
 	Version     bool     `long:"version" description:"Show version"`
+	BindAddr    string   `short:"B" long:"bind" description:"Bind outgoing connections to local address" value-name:"<address>"`
+	HeadRequest bool     `short:"i" description:"Use HEAD instead of GET"`
+	PostFile    string   `short:"p" long:"post-file" description:"File containing data to POST" value-name:"<file>"`
+	PutFile     string   `short:"u" long:"put-file" description:"File containing data to PUT" value-name:"<file>"`
 	Args        struct {
 		Url string `positional-arg-name:"URL"`
 	} `positional-args:"yes" required:"yes"`
@@ -106,7 +112,7 @@ func exitWithErrorMsg(exitCode int, message string, replacements ...interface{})
 	os.Exit(exitCode)
 }
 
-func printJsonResult(stats struct {
+func printJsonResult(method string, stats struct {
 	Requests              int64
 	RequestsCompleted     int64
 	RequestsCompletedCode [1000]int64
@@ -133,6 +139,7 @@ func printJsonResult(stats struct {
 
 	result := jsonResult{
 		TargetURL:        mainOpts.Args.Url,
+		Method:           method,
 		Bursts:           mainOpts.Bursts,
 		RequestsPerBurst: mainOpts.Requests,
 		Concurrency:      mainOpts.Concurrency,
@@ -310,6 +317,34 @@ func main() {
 		exitWithErrorMsg(2, "Invalid URL given: %s", err)
 	}
 
+	if mainOpts.HeadRequest && (mainOpts.PostFile != "" || mainOpts.PutFile != "") {
+		exitWithErrorMsg(2, "HEAD (-i) cannot be combined with POST (-p) or PUT (-u)")
+	}
+	if mainOpts.PostFile != "" && mainOpts.PutFile != "" {
+		exitWithErrorMsg(2, "POST (-p) and PUT (-u) cannot be used together")
+	}
+
+	method := "GET"
+	var bodyData []byte
+
+	if mainOpts.HeadRequest {
+		method = "HEAD"
+	} else if mainOpts.PostFile != "" {
+		method = "POST"
+		var err error
+		bodyData, err = os.ReadFile(mainOpts.PostFile)
+		if err != nil {
+			exitWithErrorMsg(2, "Cannot read POST file '%s': %s", mainOpts.PostFile, err)
+		}
+	} else if mainOpts.PutFile != "" {
+		method = "PUT"
+		var err error
+		bodyData, err = os.ReadFile(mainOpts.PutFile)
+		if err != nil {
+			exitWithErrorMsg(2, "Cannot read PUT file '%s': %s", mainOpts.PutFile, err)
+		}
+	}
+
 	// prepare headers
 	var headers textproto.MIMEHeader
 	mainOpts.Header = append(mainOpts.Header, "User-Agent: " + mainOpts.UserAgent)
@@ -322,34 +357,39 @@ func main() {
 	// setup transport
 	var tr *http.Transport = nil
 
-	if mainOpts.Proxy != "" {
-		if matched, _ := regexp.MatchString(`^\w+://`, mainOpts.Proxy); !matched {
-			mainOpts.Proxy = "http://" + mainOpts.Proxy
+	if mainOpts.BindAddr != "" || mainOpts.Proxy != "" {
+		tr = &http.Transport{}
+
+		if mainOpts.BindAddr != "" {
+			ip := net.ParseIP(mainOpts.BindAddr)
+			if ip == nil {
+				exitWithErrorMsg(4, "Invalid bind address: %s", mainOpts.BindAddr)
+			}
+			tr.DialContext = (&net.Dialer{
+				LocalAddr: &net.TCPAddr{IP: ip},
+			}).DialContext
 		}
 
-		uri, err := url.Parse(mainOpts.Proxy)
-		if err != nil {
-			exitWithErrorMsg(4, "Unable to parse proxy URL: %s", err)
-		}
-
-		if uri.Scheme == "socks5" {
-
-			tr = &http.Transport{
-				Proxy: http.ProxyURL(uri),
+		if mainOpts.Proxy != "" {
+			if matched, _ := regexp.MatchString(`^\w+://`, mainOpts.Proxy); !matched {
+				mainOpts.Proxy = "http://" + mainOpts.Proxy
 			}
 
-		} else if uri.Scheme == "https" || uri.Scheme == "http" || uri.Scheme == "" {
+			uri, err := url.Parse(mainOpts.Proxy)
+			if err != nil {
+				exitWithErrorMsg(4, "Unable to parse proxy URL: %s", err)
+			}
 
-			tr = &http.Transport{
-				Proxy: http.ProxyURL(uri),
+			if uri.Scheme == "socks5" {
+				tr.Proxy = http.ProxyURL(uri)
+			} else if uri.Scheme == "https" || uri.Scheme == "http" || uri.Scheme == "" {
+				tr.Proxy = http.ProxyURL(uri)
 				// Disable HTTP/2.
-				TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+				tr.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+			} else {
+				exitWithErrorMsg(5, "Unable to handle proxy with scheme '%s'", uri.Scheme)
 			}
-
-		} else {
-			exitWithErrorMsg(5, "Unable to handle proxy with scheme '%s'", uri.Scheme)
 		}
-
 	}
 
 	var stats struct {
@@ -368,9 +408,9 @@ func main() {
 
 	if !mainOpts.Json {
 		if mainOpts.Proxy != "" {
-			fmt.Printf("Benchmarking '%s' using proxy '%s' with a total of %d GET requests:\n\n", mainOpts.Args.Url, mainOpts.Proxy, totalRequests)
+			fmt.Printf("Benchmarking '%s' using proxy '%s' with a total of %d %s requests:\n\n", mainOpts.Args.Url, mainOpts.Proxy, totalRequests, method)
 		} else {
-			fmt.Printf("Benchmarking '%s' with a total of %d GET requests:\n\n", mainOpts.Args.Url, totalRequests)
+			fmt.Printf("Benchmarking '%s' with a total of %d %s requests:\n\n", mainOpts.Args.Url, totalRequests, method)
 		}
 	}
 
@@ -442,7 +482,11 @@ func main() {
 
 					var err error
 					var resp *http.Response
-					req, err := http.NewRequest("GET", mainOpts.Args.Url, nil)
+					var reqBody io.Reader
+					if bodyData != nil {
+						reqBody = bytes.NewReader(bodyData)
+					}
+					req, err := http.NewRequest(method, mainOpts.Args.Url, reqBody)
 					if err == nil {
 						req.Header = http.Header(headers)
 						resp, err = hc.Do(req)
@@ -532,7 +576,7 @@ func main() {
 	elapsed := stats.EndTime.Sub(stats.StartTime)
 
 	if mainOpts.Json {
-		printJsonResult(stats, elapsed)
+		printJsonResult(method, stats, elapsed)
 	} else {
 		printTextResult(stats, elapsed)
 	}
